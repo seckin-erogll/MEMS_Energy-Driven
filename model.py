@@ -1,0 +1,158 @@
+"""
+model.py — Two-head PINN for the multilayer diaphragm.
+
+Architecture
+------------
+Inputs  (7, normalised to [0,1]):
+    [ξ = r/a,  P̂,  t̂1,  t̂2,  t̂3,  â,  âg]
+
+Trunk:
+    Linear(7→128) → tanh
+    × 5 hidden layers: Linear(128→128) → tanh
+
+Two heads (raw, before hard BCs):
+    w_raw : Linear(128→1)
+    u_raw : Linear(128→1)
+
+Hard boundary conditions (applied post-network):
+    w(ξ) = (1 − ξ²)² · w_raw · W_ref      → w(1)=0, w'(1)=0, w(0) free
+    u(ξ) = ξ(1 − ξ)  · u_raw · U_ref      → u(0)=0, u(1)=0
+
+    W_ref ≈ a_g  (nondimensionalise by the air gap)
+    U_ref ≈ 0.1 · a_g
+
+DO NOT clip w to −a_g.  Contact is enforced by the obstacle penalty κ in the
+energy functional; clipping kills gradients in the contact region.
+
+Activations: tanh throughout — required for clean second derivatives of w
+in the bending term.  ReLU/GELU would produce zero or undefined w''.
+"""
+
+import torch
+import torch.nn as nn
+
+
+class DiaphragmPINN(nn.Module):
+    """
+    Physics-Informed Neural Network for the clamped multilayer diaphragm.
+
+    Parameters
+    ----------
+    n_hidden : int
+        Number of hidden layers (default 5 → total depth 6 linear layers).
+    hidden_dim : int
+        Width of each hidden layer (default 128).
+    """
+
+    def __init__(self, n_hidden: int = 5, hidden_dim: int = 128):
+        super().__init__()
+
+        # ── trunk ──────────────────────────────────────────────────────────────
+        layers = [nn.Linear(7, hidden_dim), nn.Tanh()]
+        for _ in range(n_hidden):
+            layers += [nn.Linear(hidden_dim, hidden_dim), nn.Tanh()]
+        self.trunk = nn.Sequential(*layers)
+
+        # ── two output heads ───────────────────────────────────────────────────
+        self.head_w = nn.Linear(hidden_dim, 1)   # transverse deflection
+        self.head_u = nn.Linear(hidden_dim, 1)   # radial in-plane displacement
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Xavier uniform for linear layers, zero bias for heads."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor):
+        """
+        Parameters
+        ----------
+        x : Tensor  shape (..., 7)
+            Normalised inputs [ξ, P̂, t̂1, t̂2, t̂3, â, âg].
+            ξ = x[..., 0]  must have requires_grad=True for energy computation.
+
+        Returns
+        -------
+        w : Tensor  shape (..., 1)   [metres]  transverse deflection (≤0 downward)
+        u : Tensor  shape (..., 1)   [metres]  radial in-plane displacement
+        """
+        xi = x[..., 0:1]   # normalised radial coordinate  ξ ∈ (0,1)
+
+        # ── physical scales carried in the input ───────────────────────────────
+        # x[..., 6] = âg = ag / ag_ref  (we pass normalised ag, recover physical)
+        # We need W_ref and U_ref in physical metres.
+        # The input vector carries âg as the 7th feature (index 6).
+        # Recover ag_physical by multiplying by the reference gap (5 µm = midpoint).
+        ag_ref = 5.0e-6   # metres  (mid-range of [4,6] µm)
+        ag_hat = x[..., 6:7]
+        ag_phys = ag_hat * ag_ref
+
+        W_ref = ag_phys            # ≈ ag
+        U_ref = 0.1 * ag_phys      # ≈ 0.1 ag
+
+        # ── trunk ──────────────────────────────────────────────────────────────
+        h = self.trunk(x)
+
+        # ── raw heads ──────────────────────────────────────────────────────────
+        w_raw = self.head_w(h)     # unbounded scalar
+        u_raw = self.head_u(h)     # unbounded scalar
+
+        # ── hard boundary conditions ───────────────────────────────────────────
+        # w: clamped at rim → w(ξ=1)=0 and dw/dξ(ξ=1)=0
+        #    symmetry at centre → dw/dξ(ξ=0)=0  (automatic from (1-ξ²)²)
+        bc_w = (1.0 - xi**2) ** 2          # shape factor  (=1 at ξ=0, =0 at ξ=1)
+        w = bc_w * w_raw * W_ref           # downward → network learns negative values
+
+        # u: vanishes at centre and rim
+        bc_u = xi * (1.0 - xi)
+        u = bc_u * u_raw * U_ref
+
+        return w, u
+
+
+class InputNormaliser:
+    """
+    Utility to normalise raw physical inputs to [0,1].
+
+    Geometry ranges (metres):
+        a   ∈ [280, 320] µm
+        t1  ∈ [0.8, 1.2] µm
+        t2  ∈ [0.15, 0.25] µm
+        t3  ∈ [3.0, 5.0] µm
+        ag  ∈ [4.0, 6.0] µm
+        P   ∈ [0, 20] kPa   (log-uniform sampling; normalise log(P+1))
+    """
+
+    # (lo, hi) in SI units
+    RANGES = {
+        "t1": (0.8e-6,  1.2e-6),
+        "t2": (0.15e-6, 0.25e-6),
+        "t3": (3.0e-6,  5.0e-6),
+        "a":  (280e-6,  320e-6),
+        "ag": (4.0e-6,  6.0e-6),
+    }
+    P_MAX = 20e3   # Pa
+
+    @staticmethod
+    def normalise(xi, P, t1, t2, t3, a, ag):
+        """
+        Map physical quantities to normalised inputs in [0,1].
+
+        All inputs are Tensors (or broadcastable).  Returns stacked tensor
+        of shape (..., 7): [ξ̂, P̂, t̂1, t̂2, t̂3, â, âg].
+        """
+        def _norm(val, lo, hi):
+            return (val - lo) / (hi - lo)
+
+        xi_n  = xi   # already in [0,1]
+        P_n   = torch.log1p(P / 1e3) / torch.log1p(torch.tensor(20.0))  # log-scale
+        t1_n  = _norm(t1,  *InputNormaliser.RANGES["t1"])
+        t2_n  = _norm(t2,  *InputNormaliser.RANGES["t2"])
+        t3_n  = _norm(t3,  *InputNormaliser.RANGES["t3"])
+        a_n   = _norm(a,   *InputNormaliser.RANGES["a"])
+        ag_n  = _norm(ag,  *InputNormaliser.RANGES["ag"])
+
+        return torch.stack([xi_n, P_n, t1_n, t2_n, t3_n, a_n, ag_n], dim=-1)

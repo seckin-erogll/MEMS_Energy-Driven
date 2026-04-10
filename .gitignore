@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+checkpoints/
+validation_outputs/
+loss_curve.png
+*.pt
+Supplementary/
+COMSOL_Deflection_Outputs/
