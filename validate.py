@@ -80,18 +80,18 @@ def capacitance(r, w, a, ag, t3, t4=0.0):
         b     = r[b_idx]
         # Touch region: gap = h_diel only
         r_t = r[:b_idx+1]
-        C_t = np.trapz(2 * np.pi * r_t * EPS0 / h_diel, r_t)
+        C_t = np.trapezoid(2 * np.pi * r_t * EPS0 / h_diel, r_t)
         # Non-touch annulus
         r_nt = r[b_idx:]
         w_nt = w[b_idx:]
         gap_nt = h_eff - w_nt         # h - w(r), w is negative so h+|w|
         gap_nt = np.maximum(gap_nt, h_diel)   # floor at dielectric
-        C_nt = np.trapz(2 * np.pi * r_nt * EPS0 / gap_nt, r_nt)
+        C_nt = np.trapezoid(2 * np.pi * r_nt * EPS0 / gap_nt, r_nt)
         return C_t + C_nt
     else:
         gap = h_eff - w               # h - w(r)
         gap = np.maximum(gap, h_diel)
-        return np.trapz(2 * np.pi * r * EPS0 / gap, r)
+        return np.trapezoid(2 * np.pi * r * EPS0 / gap, r)
 
 
 # ── parse geometry from filename ─────────────────────────────────────────────
@@ -143,7 +143,7 @@ def predict_w(model, normaliser, r_arr, P_val, geo, device, dtype):
 
 def validate(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype  = torch.float64
+    dtype  = torch.float32
 
     os.makedirs(OUT_DIR, exist_ok=True)
 

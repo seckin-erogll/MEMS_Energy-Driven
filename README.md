@@ -75,14 +75,18 @@ A₁₂ = Σ νₖ Ēₖ tₖ
 ```
 Π[w,u] = ∫₀ᵃ 2πr [ ½D*(w''+w'/r)²
                    + ½(A₁₁εᵣ² + 2A₁₂εᵣεθ + A₁₁εθ²)
-                   − Pw
+                   + Pw
                    + κ[max(0,−(w+ag))]² ] dr
 ```
 
 where εᵣ = u' + ½(w')²  and  εθ = u/r.
 
+Sign convention: **w < 0 for downward deflection**.
+The +Pw term (with w < 0) decreases Π as the plate deflects downward, driving equilibrium.
+E-L check: D∇⁴w + P = 0 → w = −Pa⁴/(64D\*)·(1−r²/a²)² < 0 ✓
+
 The obstacle term (κ·penetration²) enforces Signorini contact variationally.
-κ starts at 10³ and ramps ×10 every 5000 steps up to 10⁷.
+κ starts at 10⁴ and ramps ×10 every 2000 steps up to 10¹⁰.
 
 ---
 
@@ -118,11 +122,11 @@ a clamped-plate profile; deep-touch case shows flat region at w=−ag.
 ### Train — with warmup anchor (recommended)
 
 ```bash
-python train.py --steps 50000
+python train.py --steps 20000
 ```
 
-COMSOL anchor is active for steps 0–5000 only, with λ annealing 1→0.
-After step 5000 the loss is pure physics.
+COMSOL anchor is active for steps 0–2000 only, with λ annealing 1→0.
+After step 2000 the loss is pure physics.
 
 ### Validate against COMSOL
 

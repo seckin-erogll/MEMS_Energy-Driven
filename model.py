@@ -86,9 +86,11 @@ class DiaphragmPINN(nn.Module):
         # We need W_ref and U_ref in physical metres.
         # The input vector carries âg as the 7th feature (index 6).
         # Recover ag_physical by multiplying by the reference gap (5 µm = midpoint).
-        ag_ref = 5.0e-6   # metres  (mid-range of [4,6] µm)
+        # Denormalize ag: âg = (ag - ag_lo)/(ag_hi - ag_lo), so ag = âg*(ag_hi-ag_lo)+ag_lo
+        ag_lo  = 4.0e-6   # metres (lower bound of training range)
+        ag_hi  = 6.0e-6   # metres (upper bound of training range)
         ag_hat = x[..., 6:7]
-        ag_phys = ag_hat * ag_ref
+        ag_phys = ag_hat * (ag_hi - ag_lo) + ag_lo   # exact physical ag [m]
 
         W_ref = ag_phys            # ≈ ag
         U_ref = 0.1 * ag_phys      # ≈ 0.1 ag

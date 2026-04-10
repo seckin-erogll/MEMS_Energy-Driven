@@ -32,21 +32,21 @@ from model       import DiaphragmPINN, InputNormaliser
 from energy      import compute_energy
 
 # ── hyper-parameters ─────────────────────────────────────────────────────────
-TOTAL_STEPS    = 50_000
-WARMUP_STEPS   = 5_000
+TOTAL_STEPS    = 20_000
+WARMUP_STEPS   = 2_000
 LR_INIT        = 1e-3
 LR_FINAL       = 1e-4
 
 GEO_BATCH      = 64      # geometry samples per step
 P_BATCH        = 8       # pressure samples per geometry
-N_QUAD         = 64      # GL quadrature nodes
+N_QUAD         = 32      # GL quadrature nodes (32 nodes sufficient for smooth profiles)
 
-KAPPA_INIT     = 1e3
-KAPPA_MAX      = 1e7
-KAPPA_RAMP     = 5_000   # steps between ×10 ramps
+KAPPA_INIT     = 1e4
+KAPPA_MAX      = 1e10
+KAPPA_RAMP     = 2_000   # steps between ×10 ramps
 
-CKPT_INTERVAL  = 5_000
-LOG_INTERVAL   = 500
+CKPT_INTERVAL  = 4_000
+LOG_INTERVAL   = 200
 
 # geometry training ranges (SI units)
 GEO_RANGES = {
@@ -203,7 +203,7 @@ def comsol_anchor_loss(model, normaliser, records, n_samples=4, device=None, dty
 
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype  = torch.float64
+    dtype  = torch.float32
     print(f"Device: {device}  |  dtype: {dtype}")
 
     os.makedirs(CKPT_DIR, exist_ok=True)

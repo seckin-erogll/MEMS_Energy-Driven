@@ -5,8 +5,12 @@ Energy functional (Föppl–von Kármán, axisymmetric, variational form):
 
   Π[w,u] = ∫₀ᵃ 2πr [ ½D*(w''+w'/r)²
                      + ½(A11 εr² + 2A12 εr εθ + A11 εθ²)
-                     − Pw
+                     + Pw
                      + κ [max(0,−(w+ag))]²  ] dr
+
+  Sign convention: w < 0 for downward deflection.
+  The +Pw term (with w<0) decreases Π as the plate deflects, driving equilibrium.
+  E-L check: D∇⁴w + P = 0 → w = -Pa⁴/(64D*)·(1-r²/a²)²  (Kirchhoff, w<0) ✓
 
 where
     εr = u' + ½(w')²     (von Kármán radial membrane strain)
@@ -175,9 +179,12 @@ def compute_energy(
                     + 2.0 * A12_bq * eps_r * eps_theta
                     + A11_bq * eps_theta**2)
 
-    # 3) Pressure work density  −P w
-    #    (P acts downward; w is negative downward → work is positive)
-    pressure = -P_bq * w
+    # 3) Pressure work density  +P w
+    #    Convention: w < 0 for downward deflection.
+    #    E-L equation from +P*w: D∇⁴w + P = 0  →  D∇⁴w = -P  (correct sign)
+    #    E-L equation from -P*w: D∇⁴w - P = 0  →  D∇⁴w = +P  (gives upward deflection!)
+    #    Verified: Kirchhoff solution w = -Pa⁴/64D*(1-r²/a²)² satisfies +P*w form. ✓
+    pressure = P_bq * w
 
     # 4) Obstacle / Signorini penalty  κ [max(0, −(w+ag))]²
     #    Penalises penetration below the bottom electrode.
