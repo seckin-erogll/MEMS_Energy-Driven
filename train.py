@@ -32,29 +32,25 @@ from model       import DiaphragmPINN, InputNormaliser
 from energy      import compute_energy
 
 # ── hyper-parameters ─────────────────────────────────────────────────────────
-TOTAL_STEPS    = 20_000
-WARMUP_STEPS   = 2_000
+TOTAL_STEPS    = 50_000
+WARMUP_STEPS   = 5_000
 LR_INIT        = 1e-3
 LR_FINAL       = 1e-4
 
 GEO_BATCH      = 64      # geometry samples per step
 P_BATCH        = 8       # pressure samples per geometry
-N_QUAD         = 32      # GL quadrature nodes (32 nodes sufficient for smooth profiles)
+N_QUAD         = 32      # GL quadrature nodes
 
-KAPPA_INIT     = 1e4
-KAPPA_MAX      = 1e10
-KAPPA_RAMP     = 2_000   # steps between ×10 ramps
-
-CKPT_INTERVAL  = 4_000
+CKPT_INTERVAL  = 10_000
 LOG_INTERVAL   = 200
 
-# geometry training ranges (SI units)
+# geometry training ranges (SI units) — matched to the COMSOL dataset
 GEO_RANGES = {
-    "t1": (0.8e-6,  1.2e-6),
-    "t2": (0.15e-6, 0.25e-6),
-    "t3": (3.0e-6,  5.0e-6),
-    "a":  (280e-6,  320e-6),
-    "ag": (4.0e-6,  6.0e-6),
+    "t1": (1.0e-6,   5.0e-6),
+    "t2": (0.2e-6,   0.5e-6),
+    "t3": (1.0e-6,   5.0e-6),
+    "a":  (150e-6,  500e-6),
+    "ag": (5.0e-6,  15.0e-6),
 }
 P_RANGE = (10.0, 20e3)   # Pa  (log-uniform; lower bound avoids log(0))
 
@@ -213,7 +209,6 @@ def train(args):
     optimizer   = optim.Adam(model.parameters(), lr=LR_INIT)
 
     start_step = 0
-    kappa      = KAPPA_INIT
     loss_history = []
 
     # ── resume from checkpoint ────────────────────────────────────────────────
@@ -222,7 +217,6 @@ def train(args):
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         start_step   = ckpt["step"]
-        kappa        = ckpt["kappa"]
         loss_history = ckpt.get("loss_history", [])
         print(f"Resumed from {args.checkpoint} at step {start_step}")
 
@@ -243,10 +237,6 @@ def train(args):
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
-        # ── kappa ramp ────────────────────────────────────────────────────────
-        if step > 0 and step % KAPPA_RAMP == 0:
-            kappa = min(kappa * 10.0, KAPPA_MAX)
-
         # ── sample batch ──────────────────────────────────────────────────────
         t1g, t2g, t3g, ag_, agg = sample_geometries(GEO_BATCH, device, dtype)
         Pg = sample_pressures_log(P_BATCH, device, dtype)
@@ -264,7 +254,7 @@ def train(args):
         L_energy = compute_energy(
             model, Pb, t1b, t2b, t3b, ab, agb,
             D_star, A11, A12,
-            normaliser, n_quad=N_QUAD, kappa=kappa,
+            normaliser, n_quad=N_QUAD,
         )
 
         # ── optional warmup anchor ────────────────────────────────────────────
@@ -292,8 +282,7 @@ def train(args):
         if step % LOG_INTERVAL == 0:
             elapsed = time.time() - t0
             print(f"step {step:6d} | L_energy={loss_val:.4e} | "
-                  f"kappa={kappa:.0e} | lam={lam:.3f} | "
-                  f"lr={lr:.2e} | {elapsed:.1f}s")
+                  f"lam={lam:.3f} | lr={lr:.2e} | {elapsed:.1f}s")
 
         # ── checkpoint ────────────────────────────────────────────────────────
         if step > 0 and step % CKPT_INTERVAL == 0:
@@ -302,7 +291,6 @@ def train(args):
                 "step":         step,
                 "model":        model.state_dict(),
                 "optimizer":    optimizer.state_dict(),
-                "kappa":        kappa,
                 "loss_history": loss_history,
             }, path)
             print(f"  → saved {path}")
@@ -313,7 +301,6 @@ def train(args):
         "step":         args.steps,
         "model":        model.state_dict(),
         "optimizer":    optimizer.state_dict(),
-        "kappa":        kappa,
         "loss_history": loss_history,
     }, final_path)
     print(f"Training complete. Final checkpoint: {final_path}")

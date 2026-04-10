@@ -81,11 +81,13 @@ def compute_energy(
     A12,        # (B,)   membrane Poisson coupling  [N/m]
     normaliser,
     n_quad: int = 64,
-    kappa: float = 1e3,
 ):
     """
     Evaluate the total potential energy Π for a batch of geometries and
     pressures by Gauss–Legendre quadrature on ξ ∈ (0,1).
+
+    Contact is enforced as a hard constraint inside the model (smooth-max BC),
+    so no obstacle/κ penalty term is needed here.
 
     Parameters
     ----------
@@ -97,12 +99,12 @@ def compute_energy(
     A11, A12    : (B,)  from lamination.compute_laminate_stiffness
     normaliser  : InputNormaliser
     n_quad      : number of GL quadrature nodes
-    kappa       : obstacle penalty coefficient  [Pa/m²]  (ramped during training)
 
     Returns
     -------
-    Pi : scalar  (mean over batch)  [J/m²·m²] = [J]
-        Total potential energy, differentiable w.r.t. model parameters.
+    Pi : scalar  (per-sample-normalised mean over batch)
+        Dimensionless loss ≈ O(1); each sample contributes equally regardless
+        of pressure/geometry scale, so low-P samples are not swamped.
     """
     B = P.shape[0]
     device = P.device
@@ -168,9 +170,10 @@ def compute_energy(
     A11_bq    = _bq(A11).reshape(-1).detach()
     A12_bq    = _bq(A12).reshape(-1).detach()
     P_bq      = P_flat.detach()
-    ag_bq     = ag_flat.detach()
 
     # 1) Bending energy density  ½ D* (w'' + w'/r)²
+    #    For a clamped plate the Gaussian curvature term integrates to zero, so
+    #    ½D*(∇²w)² is the exact bending energy.
     bending = 0.5 * Dstar_bq * (w_rr + w_r / r)**2
 
     # 2) Full biaxial membrane energy density
@@ -181,18 +184,14 @@ def compute_energy(
 
     # 3) Pressure work density  +P w
     #    Convention: w < 0 for downward deflection.
-    #    E-L equation from +P*w: D∇⁴w + P = 0  →  D∇⁴w = -P  (correct sign)
-    #    E-L equation from -P*w: D∇⁴w - P = 0  →  D∇⁴w = +P  (gives upward deflection!)
-    #    Verified: Kirchhoff solution w = -Pa⁴/64D*(1-r²/a²)² satisfies +P*w form. ✓
+    #    E-L: D∇⁴w + P = 0  →  w = −Pa⁴/(64D*)·(1−r²/a²)² < 0 ✓
     pressure = P_bq * w
 
-    # 4) Obstacle / Signorini penalty  κ [max(0, −(w+ag))]²
-    #    Penalises penetration below the bottom electrode.
-    penetration = torch.clamp(-(w + ag_bq), min=0.0)
-    obstacle    = kappa * penetration**2
+    # Contact is enforced as a hard smooth-max constraint in model.forward(),
+    # so no obstacle penalty term is needed.
 
     # total integrand density × 2πr
-    integrand = 2.0 * torch.pi * r * (bending + membrane + pressure + obstacle)
+    integrand = 2.0 * torch.pi * r * (bending + membrane + pressure)
 
     # ── Gauss–Legendre quadrature ─────────────────────────────────────────────
     # integrand shape: (B*Q,) → (B, Q)
@@ -202,4 +201,13 @@ def compute_energy(
     a_factor = a.detach().unsqueeze(1)                       # (B, 1)
     Pi_per_sample = (integrand_bq * xi_weights.unsqueeze(0) * a_factor).sum(dim=1)
 
-    return Pi_per_sample.mean()
+    # ── per-sample normalisation ──────────────────────────────────────────────
+    # The energy magnitude spans many orders of magnitude across (P, a, ag).
+    # Dividing each sample by its own |Π| equalises gradient contributions so
+    # that low-P / small-geometry samples are not swamped by large ones.
+    # The floor prevents amplifying samples that happen to be near equilibrium.
+    Pi_abs = Pi_per_sample.detach().abs()
+    floor  = Pi_abs.mean().clamp(min=1e-30) * 1e-2   # 1 % of batch mean
+    Pi_normalised = Pi_per_sample / Pi_abs.clamp(min=floor)
+
+    return Pi_normalised.mean()

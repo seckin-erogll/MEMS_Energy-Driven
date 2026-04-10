@@ -14,15 +14,21 @@ Two heads (raw, before hard BCs):
     w_raw : Linear(128→1)
     u_raw : Linear(128→1)
 
-Hard boundary conditions (applied post-network):
-    w(ξ) = (1 − ξ²)² · w_raw · W_ref      → w(1)=0, w'(1)=0, w(0) free
-    u(ξ) = ξ(1 − ξ)  · u_raw · U_ref      → u(0)=0, u(1)=0
+Hard boundary + contact conditions (applied post-network):
+    Profile:   w_profile(ξ) = (1 − ξ²)² · w_raw · W_ref
+               enforces w(1)=0, w'(1)=0, symmetry at ξ=0.
 
-    W_ref ≈ a_g  (nondimensionalise by the air gap)
-    U_ref ≈ 0.1 · a_g
+    Contact:   w(ξ) = smooth_max(w_profile, −ag)
+               using smooth_max(a,b) = (a+b+√((a−b)²+ε²))/2  with ε=50 nm.
+               This is a hard constraint: w ≥ −ag everywhere, with a smooth
+               transition of width ε at the contact line.  Gradient is always
+               nonzero (unlike torch.clamp), so learning continues in the
+               contact region.
 
-DO NOT clip w to −a_g.  Contact is enforced by the obstacle penalty κ in the
-energy functional; clipping kills gradients in the contact region.
+    u(ξ) = ξ(1 − ξ) · u_raw · U_ref      → u(0)=0, u(1)=0
+
+    W_ref = ag_phys  (deflections normalised by air gap)
+    U_ref = 0.1 · ag_phys
 
 Activations: tanh throughout — required for clean second derivatives of w
 in the bending term.  ReLU/GELU would produce zero or undefined w''.
@@ -87,13 +93,13 @@ class DiaphragmPINN(nn.Module):
         # The input vector carries âg as the 7th feature (index 6).
         # Recover ag_physical by multiplying by the reference gap (5 µm = midpoint).
         # Denormalize ag: âg = (ag - ag_lo)/(ag_hi - ag_lo), so ag = âg*(ag_hi-ag_lo)+ag_lo
-        ag_lo  = 4.0e-6   # metres (lower bound of training range)
-        ag_hi  = 6.0e-6   # metres (upper bound of training range)
+        ag_lo  = 5.0e-6    # metres — lower bound of training range
+        ag_hi  = 15.0e-6   # metres — upper bound of training range
         ag_hat = x[..., 6:7]
         ag_phys = ag_hat * (ag_hi - ag_lo) + ag_lo   # exact physical ag [m]
 
-        W_ref = ag_phys            # ≈ ag
-        U_ref = 0.1 * ag_phys      # ≈ 0.1 ag
+        W_ref = ag_phys            # deflection scale ≈ ag
+        U_ref = 0.1 * ag_phys      # in-plane scale  ≈ 0.1 ag
 
         # ── trunk ──────────────────────────────────────────────────────────────
         h = self.trunk(x)
@@ -103,10 +109,18 @@ class DiaphragmPINN(nn.Module):
         u_raw = self.head_u(h)     # unbounded scalar
 
         # ── hard boundary conditions ───────────────────────────────────────────
-        # w: clamped at rim → w(ξ=1)=0 and dw/dξ(ξ=1)=0
-        #    symmetry at centre → dw/dξ(ξ=0)=0  (automatic from (1-ξ²)²)
-        bc_w = (1.0 - xi**2) ** 2          # shape factor  (=1 at ξ=0, =0 at ξ=1)
-        w = bc_w * w_raw * W_ref           # downward → network learns negative values
+        # Profile: (1-ξ²)² enforces w(1)=0, w'(1)=0, and dw/dξ(0)=0 by symmetry.
+        bc_w      = (1.0 - xi**2) ** 2
+        w_profile = bc_w * w_raw * W_ref      # unconstrained (may exceed -ag)
+
+        # Hard contact constraint via smooth-max: w ≥ -ag_phys everywhere.
+        # smooth_max(a, b) = (a + b + √((a-b)² + ε²)) / 2  →  max(a,b) as ε→0
+        # ε = 50 nm gives a ~50 nm transition band at the contact line.
+        eps_c = 5e-8                          # 50 nm smoothing width [m]
+        contact_floor = -ag_phys
+        diff  = w_profile - contact_floor
+        w = 0.5 * (w_profile + contact_floor
+                   + torch.sqrt(diff**2 + eps_c**2))   # ≥ -ag, smooth
 
         # u: vanishes at centre and rim
         bc_u = xi * (1.0 - xi)
@@ -128,13 +142,13 @@ class InputNormaliser:
         P   ∈ [0, 20] kPa   (log-uniform sampling; normalise log(P+1))
     """
 
-    # (lo, hi) in SI units
+    # (lo, hi) in SI units — matched to the COMSOL dataset range
     RANGES = {
-        "t1": (0.8e-6,  1.2e-6),
-        "t2": (0.15e-6, 0.25e-6),
-        "t3": (3.0e-6,  5.0e-6),
-        "a":  (280e-6,  320e-6),
-        "ag": (4.0e-6,  6.0e-6),
+        "t1": (1.0e-6,   5.0e-6),
+        "t2": (0.2e-6,   0.5e-6),
+        "t3": (1.0e-6,   5.0e-6),
+        "a":  (150e-6,  500e-6),
+        "ag": (5.0e-6,  15.0e-6),
     }
     P_MAX = 20e3   # Pa
 
