@@ -460,6 +460,49 @@ def kapasitans_grafigi(fig_no, fpath, model, norm, device):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CSV DIŞA AKTARMA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def export_deflection_csv(fig_no, fpath, pressures_Pa, model, norm, device):
+    """
+    Defleksiyon profil verilerini CSV olarak kaydeder.
+
+    Çıktı: defleksiyon_<fig_no>.csv
+    Kolonlar: r_um, w_comsol_<P>Pa_um, w_analitik_<P>Pa_um, w_pinn_<P>Pa_um, ...
+    """
+    geo  = parse_geo(fpath)
+    df   = pd.read_csv(fpath)
+    r_um = df["r_um"].values
+    r_m  = r_um * 1e-6
+
+    P_arr = np.array(pressures_Pa, dtype=float)
+    w_pinn_batch = pinn_batch(model, norm, r_m, P_arr, geo, device)
+
+    out_df = pd.DataFrame({"r_um": r_um})
+
+    for k, P in enumerate(pressures_Pa):
+        P_int = int(P)
+        col   = f"w_{P_int}Pa_um"
+
+        if col in df.columns:
+            out_df[f"w_comsol_{P_int}Pa_um"] = df[col].values
+        else:
+            out_df[f"w_comsol_{P_int}Pa_um"] = np.nan
+
+        w_an = analytical_profile(P, geo["t1"], geo["t2"], geo["t3"], geo["a"], r_m, geo["ag"])
+        out_df[f"w_analitik_{P_int}Pa_um"] = w_an * 1e6
+
+        if w_pinn_batch is not None:
+            out_df[f"w_pinn_{P_int}Pa_um"] = w_pinn_batch[k] * 1e6
+        else:
+            out_df[f"w_pinn_{P_int}Pa_um"] = np.nan
+
+    out_path = os.path.join(OUT_DIR, f"defleksiyon_{fig_no}.csv")
+    out_df.to_csv(out_path, index=False, float_format="%.6f")
+    print(f"    ✓ {out_path}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ANA PROGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -491,13 +534,14 @@ def main():
     pressures = [float(p) for p in args.pressures]
     print(f"Basınç noktaları: {[p/1e3 for p in pressures]} kPa\n")
 
-    # ── 5 Defleksiyon Grafiği ─────────────────────────────────────────────────
+    # ── 5 Defleksiyon Grafiği + CSV ───────────────────────────────────────────
     print("=" * 55)
-    print("  DEFLEKSİYON GRAFİKLERİ")
+    print("  DEFLEKSİYON GRAFİKLERİ + CSV")
     print("=" * 55)
     for i, fpath in enumerate(sample_files, 1):
         print(f"\n  Geometri {i}: {os.path.basename(fpath)}")
         defleksiyon_grafigi(i, fpath, pressures, model, norm, device)
+        export_deflection_csv(i, fpath, pressures, model, norm, device)
 
     # ── 5 Kapasitans Grafiği ──────────────────────────────────────────────────
     print("\n" + "=" * 55)
